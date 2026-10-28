@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "666956569524",
+    "project_id": "megamovies-75db0",
+    "storage_bucket": "megamovies-75db0.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:666956569524:android:7b2cc8a0fa3f7dbf8d30e1",
+        "android_client_info": {
+          "package_name": "com.megamovies.app"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyCZZSHbxPH1lc5INyUjgkhAOx5bHr6XuhY"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

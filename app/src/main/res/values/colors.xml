@@ -1,0 +1,3 @@
+<resources>
+<color name="statusBarColor">#FFF8F8</color><color name="statusBarColorDark">#500811</color><color name="navigationBarColor">#FFF8F8</color><color name="navigationBarColorDark">#500811</color><color name="backgroundColor">#FFF8F8</color><color name="splashBackground">#500811</color><color name="gkPrimary">#C51F30</color><color name="gkPrimaryDark">#8B1422</color><color name="gkGold">#F8B4BA</color>
+</resources>

@@ -1,0 +1,861 @@
+package com.megamovies.app;
+
+import android.app.Activity;
+import android.app.DownloadManager;
+import android.app.NotificationChannel;
+import android.app.NotificationManager;
+import android.Manifest;
+import android.content.SharedPreferences;
+import android.content.pm.PackageManager;
+import android.content.res.ColorStateList;
+import android.content.Context;
+import android.content.Intent;
+import android.content.pm.ActivityInfo;
+import android.graphics.Color;
+import android.net.ConnectivityManager;
+import android.net.NetworkInfo;
+import android.net.Uri;
+import android.os.Build;
+import android.os.Bundle;
+import android.os.Environment;
+import android.os.Handler;
+import android.os.Looper;
+import android.util.Log;
+import android.util.TypedValue;
+import android.view.Gravity;
+import android.view.View;
+import android.view.ViewGroup;
+import android.webkit.CookieManager;
+import android.webkit.DownloadListener;
+import android.webkit.JavascriptInterface;
+import android.webkit.URLUtil;
+import android.webkit.ValueCallback;
+import android.webkit.WebChromeClient;
+import android.webkit.WebResourceRequest;
+import android.webkit.WebSettings;
+import android.webkit.WebView;
+import android.webkit.WebViewClient;
+import android.widget.FrameLayout;
+import android.widget.ImageView;
+import android.widget.LinearLayout;
+import android.widget.ProgressBar;
+import android.widget.TextView;
+import android.widget.Toast;
+
+import androidx.swiperefreshlayout.widget.SwipeRefreshLayout;
+import com.google.firebase.messaging.FirebaseMessaging;
+
+import java.net.HttpURLConnection;
+import java.net.URL;
+import java.util.Locale;
+
+public class MainActivity extends Activity {
+    private static final String TAG = "GKMoviesMain";
+    private static final int REQ_FILE_CHOOSER = 702;
+    private static final int REQ_NOTIFICATIONS = 703;
+    private static final String HOME_URL = "https://megamovies.com.ng/?source=android_app";
+    private static final String SITE_ORIGIN = "https://megamovies.com.ng/";
+    private static final String SESSION_PREFS = "mega_movies_session";
+    private static final String SAVED_COOKIES = "site_cookies";
+
+    private WebView webView;
+    private SwipeRefreshLayout swipeRefreshLayout;
+    private ValueCallback<Uri[]> filePathCallback;
+    private ProgressBar topProgressBar;
+    private ProgressBar splashProgressBar;
+    private TextView splashProgressText;
+    private FrameLayout splashOverlay;
+    private FrameLayout rootLayout;
+    private View customFullscreenView;
+    private WebChromeClient.CustomViewCallback customViewCallback;
+    private int originalSystemUiVisibility;
+    private int originalOrientation;
+    private boolean firstPageLoaded = false;
+    private boolean offlineToastShown = false;
+
+    @Override
+    protected void onCreate(Bundle savedInstanceState) {
+        super.onCreate(savedInstanceState);
+        configureSystemBars();
+        restorePersistentSession();
+        setupWebView();
+        createPushNotificationChannel();
+        requestNotificationPermission();
+        subscribeToPushNotifications();
+
+        String url = getLaunchUrl();
+        webView.loadUrl(url);
+    }
+
+    private String getLaunchUrl() {
+        Intent intent = getIntent();
+        if (intent != null) {
+            Uri data = intent.getData();
+            if (data != null && ("https".equals(data.getScheme()) || "http".equals(data.getScheme()))) {
+                return data.toString();
+            }
+            String extra = intent.getStringExtra("url");
+            if (extra != null && extra.startsWith("http")) return extra;
+            extra = intent.getStringExtra("open_url");
+            if (extra != null && extra.startsWith("http")) return extra;
+        }
+        return HOME_URL;
+    }
+
+    private void configureSystemBars() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+            getWindow().setStatusBarColor(Color.rgb(255, 248, 248));
+            getWindow().setNavigationBarColor(Color.rgb(255, 248, 248));
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            int flags = View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR;
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                flags |= View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR;
+            }
+            getWindow().getDecorView().setSystemUiVisibility(flags);
+        }
+    }
+
+    private void applySafeAreaForCameraCutout(View root) {
+        if (Build.VERSION.SDK_INT >= 35) {
+            root.setOnApplyWindowInsetsListener((view, insets) -> {
+                int top = insets.getSystemWindowInsetTop();
+                int bottom = insets.getSystemWindowInsetBottom();
+                int left = insets.getSystemWindowInsetLeft();
+                int right = insets.getSystemWindowInsetRight();
+                view.setPadding(left, top, right, bottom);
+                return insets;
+            });
+            root.post(root::requestApplyInsets);
+        }
+    }
+
+    private void setupWebView() {
+        FrameLayout root = new FrameLayout(this);
+        rootLayout = root;
+        root.setBackgroundColor(Color.rgb(255, 248, 248));
+        applySafeAreaForCameraCutout(root);
+
+        swipeRefreshLayout = new SwipeRefreshLayout(this);
+        webView = new WebView(this);
+        swipeRefreshLayout.addView(webView, new SwipeRefreshLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
+        ));
+        root.addView(swipeRefreshLayout, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
+        ));
+
+        topProgressBar = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
+        topProgressBar.setMax(100);
+        topProgressBar.setProgress(0);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+            topProgressBar.setProgressTintList(ColorStateList.valueOf(Color.rgb(197, 31, 48)));
+        }
+        topProgressBar.setVisibility(View.GONE);
+        FrameLayout.LayoutParams topParams = new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                dp(3)
+        );
+        topParams.gravity = Gravity.TOP;
+        root.addView(topProgressBar, topParams);
+
+        splashOverlay = new FrameLayout(this);
+        splashOverlay.setBackgroundColor(Color.rgb(80, 8, 17));
+        FrameLayout.LayoutParams splashParams = new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
+        );
+
+        LinearLayout splashContent = new LinearLayout(this);
+        splashContent.setOrientation(LinearLayout.VERTICAL);
+        splashContent.setGravity(Gravity.CENTER);
+        splashContent.setPadding(dp(24), dp(24), dp(24), dp(24));
+
+        ImageView logo = new ImageView(this);
+        logo.setImageResource(R.drawable.logo_splash);
+        logo.setAdjustViewBounds(true);
+        logo.setScaleType(ImageView.ScaleType.FIT_CENTER);
+        LinearLayout.LayoutParams logoParams = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+        );
+        logoParams.width = dp(156);
+        logoParams.height = dp(156);
+        logoParams.bottomMargin = dp(10);
+        splashContent.addView(logo, logoParams);
+
+        TextView splashTitle = new TextView(this);
+        splashTitle.setText("Mega Movies");
+        splashTitle.setTextColor(Color.WHITE);
+        splashTitle.setTextSize(TypedValue.COMPLEX_UNIT_SP, 24);
+        splashTitle.setGravity(Gravity.CENTER);
+        splashTitle.setTypeface(android.graphics.Typeface.DEFAULT, android.graphics.Typeface.BOLD);
+        splashContent.addView(splashTitle);
+
+        TextView splashTagline = new TextView(this);
+        splashTagline.setText("Movies. Stories. More.");
+        splashTagline.setTextColor(Color.WHITE);
+        splashTagline.setTextSize(TypedValue.COMPLEX_UNIT_SP, 16);
+        splashTagline.setGravity(Gravity.CENTER);
+        splashTagline.setLetterSpacing(0.04f);
+        splashTagline.setTypeface(android.graphics.Typeface.DEFAULT, android.graphics.Typeface.BOLD);
+        LinearLayout.LayoutParams taglineParams = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+        );
+        taglineParams.bottomMargin = dp(24);
+        splashContent.addView(splashTagline, taglineParams);
+
+        splashProgressBar = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
+        splashProgressBar.setMax(100);
+        splashProgressBar.setProgress(8);
+        splashProgressBar.setIndeterminate(false);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+            splashProgressBar.setProgressTintList(ColorStateList.valueOf(Color.WHITE));
+        }
+        LinearLayout.LayoutParams splashBarParams = new LinearLayout.LayoutParams(
+                dp(220),
+                ViewGroup.LayoutParams.WRAP_CONTENT
+        );
+        splashContent.addView(splashProgressBar, splashBarParams);
+
+        splashProgressText = new TextView(this);
+        splashProgressText.setText("8%");
+        splashProgressText.setTextColor(Color.WHITE);
+        splashProgressText.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
+        splashProgressText.setGravity(Gravity.CENTER);
+        LinearLayout.LayoutParams splashTextParams = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+        );
+        splashTextParams.topMargin = dp(10);
+        splashContent.addView(splashProgressText, splashTextParams);
+
+        FrameLayout.LayoutParams splashContentParams = new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                Gravity.CENTER
+        );
+        splashOverlay.addView(splashContent, splashContentParams);
+        root.addView(splashOverlay, splashParams);
+
+        setContentView(root);
+
+        WebSettings settings = webView.getSettings();
+        settings.setJavaScriptEnabled(true);
+        settings.setDomStorageEnabled(true);
+        settings.setDatabaseEnabled(true);
+        settings.setLoadWithOverviewMode(true);
+        settings.setUseWideViewPort(true);
+        settings.setAllowFileAccess(true);
+        settings.setAllowContentAccess(true);
+        settings.setMediaPlaybackRequiresUserGesture(false);
+        settings.setLoadsImagesAutomatically(true);
+        settings.setBuiltInZoomControls(false);
+        settings.setDisplayZoomControls(false);
+        settings.setSupportMultipleWindows(false);
+        settings.setJavaScriptCanOpenWindowsAutomatically(true);
+        updateCacheMode();
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+            settings.setMixedContentMode(WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE);
+            CookieManager.getInstance().setAcceptThirdPartyCookies(webView, true);
+        }
+        CookieManager.getInstance().setAcceptCookie(true);
+
+        String ua = settings.getUserAgentString();
+        settings.setUserAgentString(ua + " GKMoviesAndroid/" + BuildConfig.VERSION_NAME);
+
+        webView.setBackgroundColor(Color.rgb(255, 248, 248));
+        webView.addJavascriptInterface(new MovieDownloadBridge(), "GKMoviesAndroidBridge");
+
+        webView.setWebViewClient(new WebViewClient() {
+            @Override
+            public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP && request != null) {
+                    return handleUrl(request.getUrl());
+                }
+                return false;
+            }
+
+            @Override
+            public boolean shouldOverrideUrlLoading(WebView view, String url) {
+                return handleUrl(Uri.parse(url));
+            }
+
+            @Override
+            public void onPageStarted(WebView view, String url, android.graphics.Bitmap favicon) {
+                updateCacheMode();
+                topProgressBar.setVisibility(View.VISIBLE);
+                if (!firstPageLoaded) {
+                    splashOverlay.setVisibility(View.VISIBLE);
+                }
+                super.onPageStarted(view, url, favicon);
+            }
+
+            @Override
+            public void onPageFinished(WebView view, String url) {
+                swipeRefreshLayout.setRefreshing(false);
+                updatePersistentSession(url);
+                injectDownloadClickInterceptor(view);
+                maybeHideSplash();
+                super.onPageFinished(view, url);
+            }
+        });
+
+        webView.setWebChromeClient(new WebChromeClient() {
+            @Override
+            public void onProgressChanged(WebView view, int newProgress) {
+                topProgressBar.setProgress(newProgress);
+                splashProgressBar.setProgress(Math.max(8, newProgress));
+                splashProgressText.setText(Math.max(8, newProgress) + "%");
+                if (newProgress >= 100) {
+                    topProgressBar.setVisibility(View.GONE);
+                    maybeHideSplash();
+                } else {
+                    topProgressBar.setVisibility(View.VISIBLE);
+                }
+                super.onProgressChanged(view, newProgress);
+            }
+
+            @Override
+            public void onShowCustomView(View view, CustomViewCallback callback) {
+                if (customFullscreenView != null) {
+                    callback.onCustomViewHidden();
+                    return;
+                }
+
+                customFullscreenView = view;
+                customViewCallback = callback;
+                originalSystemUiVisibility = getWindow().getDecorView().getSystemUiVisibility();
+                originalOrientation = getRequestedOrientation();
+
+                swipeRefreshLayout.setVisibility(View.GONE);
+                topProgressBar.setVisibility(View.GONE);
+                splashOverlay.setVisibility(View.GONE);
+
+                FrameLayout.LayoutParams params = new FrameLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.MATCH_PARENT
+                );
+                params.gravity = Gravity.CENTER;
+                rootLayout.addView(customFullscreenView, params);
+                rootLayout.setBackgroundColor(Color.BLACK);
+
+                getWindow().getDecorView().setSystemUiVisibility(
+                        View.SYSTEM_UI_FLAG_FULLSCREEN
+                                | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+                                | View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+                                | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+                                | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
+                                | View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+                );
+
+                try {
+                    setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE);
+                } catch (Exception ignored) {}
+            }
+
+            @Override
+            public void onHideCustomView() {
+                hideFullscreenCustomView();
+            }
+
+            @Override
+            public boolean onShowFileChooser(WebView webView, ValueCallback<Uri[]> filePathCallback, FileChooserParams fileChooserParams) {
+                if (MainActivity.this.filePathCallback != null) {
+                    MainActivity.this.filePathCallback.onReceiveValue(null);
+                }
+                MainActivity.this.filePathCallback = filePathCallback;
+                try {
+                    Intent intent = fileChooserParams.createIntent();
+                    startActivityForResult(intent, REQ_FILE_CHOOSER);
+                    return true;
+                } catch (Exception e) {
+                    MainActivity.this.filePathCallback = null;
+                    Toast.makeText(MainActivity.this, "Cannot open file picker", Toast.LENGTH_SHORT).show();
+                    return false;
+                }
+            }
+        });
+
+        webView.setDownloadListener(new DownloadListener() {
+            @Override
+            public void onDownloadStart(String url, String userAgent, String contentDisposition, String mimeType, long contentLength) {
+                startDownload(url, userAgent, contentDisposition, mimeType, null);
+            }
+        });
+
+        swipeRefreshLayout.setOnRefreshListener(() -> webView.reload());
+    }
+
+    private void hideFullscreenCustomView() {
+        if (customFullscreenView == null) return;
+
+        try {
+            rootLayout.removeView(customFullscreenView);
+        } catch (Exception ignored) {}
+
+        customFullscreenView = null;
+        rootLayout.setBackgroundColor(Color.rgb(255, 248, 248));
+        swipeRefreshLayout.setVisibility(View.VISIBLE);
+
+        getWindow().getDecorView().setSystemUiVisibility(originalSystemUiVisibility);
+        try {
+            setRequestedOrientation(originalOrientation);
+        } catch (Exception ignored) {}
+
+        if (customViewCallback != null) {
+            customViewCallback.onCustomViewHidden();
+            customViewCallback = null;
+        }
+    }
+
+    private void maybeHideSplash() {
+        if (webView.getProgress() >= 100) {
+            firstPageLoaded = true;
+            new Handler(Looper.getMainLooper()).postDelayed(() -> {
+                splashOverlay.setVisibility(View.GONE);
+                topProgressBar.setVisibility(View.GONE);
+            }, 180);
+        }
+    }
+
+    private int dp(int value) {
+        return (int) TypedValue.applyDimension(
+                TypedValue.COMPLEX_UNIT_DIP,
+                value,
+                getResources().getDisplayMetrics()
+        );
+    }
+
+    private void updateCacheMode() {
+        if (webView == null) return;
+        WebSettings settings = webView.getSettings();
+        if (isNetworkAvailable()) {
+            settings.setCacheMode(WebSettings.LOAD_DEFAULT);
+            offlineToastShown = false;
+        } else {
+            settings.setCacheMode(WebSettings.LOAD_CACHE_ELSE_NETWORK);
+            if (!offlineToastShown) {
+                offlineToastShown = true;
+                Toast.makeText(this, "Offline mode: loading saved pages", Toast.LENGTH_SHORT).show();
+            }
+        }
+    }
+
+    private boolean isNetworkAvailable() {
+        ConnectivityManager cm = (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
+        if (cm == null) return false;
+        NetworkInfo networkInfo = cm.getActiveNetworkInfo();
+        return networkInfo != null && networkInfo.isConnected();
+    }
+
+    private void requestNotificationPermission() {
+        if (Build.VERSION.SDK_INT >= 33
+                && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(new String[]{Manifest.permission.POST_NOTIFICATIONS}, REQ_NOTIFICATIONS);
+        }
+    }
+
+    private void createPushNotificationChannel() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return;
+        NotificationManager manager =
+                (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
+        if (manager == null) return;
+        NotificationChannel channel = new NotificationChannel(
+                GkFirebaseMessagingService.CHANNEL_ID,
+                getString(R.string.push_channel_name),
+                NotificationManager.IMPORTANCE_HIGH
+        );
+        channel.setDescription(getString(R.string.push_channel_description));
+        channel.enableVibration(true);
+        manager.createNotificationChannel(channel);
+    }
+
+    private void subscribeToPushNotifications() {
+        FirebaseMessaging.getInstance().subscribeToTopic("mega_movies_all")
+                .addOnFailureListener(error -> Log.w(TAG, "Push topic subscription failed", error));
+    }
+
+    private void restorePersistentSession() {
+        String cookies = getSharedPreferences(SESSION_PREFS, MODE_PRIVATE).getString(SAVED_COOKIES, "");
+        if (cookies == null || cookies.trim().isEmpty()) return;
+        CookieManager cookieManager = CookieManager.getInstance();
+        cookieManager.setAcceptCookie(true);
+        for (String cookie : cookies.split(";")) {
+            String value = cookie.trim();
+            if (!value.isEmpty()) {
+                cookieManager.setCookie(SITE_ORIGIN, value + "; Path=/; Secure; SameSite=Lax");
+            }
+        }
+        cookieManager.flush();
+    }
+
+    private boolean isExplicitLogout(String url) {
+        if (url == null) return false;
+        String lower = url.toLowerCase(Locale.US);
+        return (lower.contains("action=logout") || lower.contains("loggedout=true"))
+                && (lower.contains("wp-login.php") || lower.contains("logout"));
+    }
+
+    private void updatePersistentSession(String url) {
+        SharedPreferences preferences = getSharedPreferences(SESSION_PREFS, MODE_PRIVATE);
+        if (isExplicitLogout(url)) {
+            preferences.edit().remove(SAVED_COOKIES).apply();
+            return;
+        }
+        String cookies = CookieManager.getInstance().getCookie(SITE_ORIGIN);
+        if (cookies != null && (cookies.contains("wordpress_logged_in_") || cookies.contains("wp_woocommerce_session_"))) {
+            preferences.edit().putString(SAVED_COOKIES, cookies).apply();
+            CookieManager.getInstance().flush();
+        }
+    }
+
+    private void clearPersistentSession() {
+        getSharedPreferences(SESSION_PREFS, MODE_PRIVATE).edit().remove(SAVED_COOKIES).apply();
+    }
+
+    private class MovieDownloadBridge {
+        @JavascriptInterface
+        public void startMovieDownload(final String url, final String suggestedTitle) {
+            if (url == null || url.trim().isEmpty()) return;
+            runOnUiThread(() -> startDownload(
+                    url,
+                    webView != null ? webView.getSettings().getUserAgentString() : "GKMoviesAndroid/" + BuildConfig.VERSION_NAME,
+                    "attachment",
+                    guessMimeTypeFromUrl(url),
+                    suggestedTitle
+            ));
+        }
+
+        @JavascriptInterface
+        public void logoutRequested() {
+            clearPersistentSession();
+        }
+    }
+
+    private void injectDownloadClickInterceptor(WebView view) {
+        if (view == null) return;
+        String js = "(function(){"
+                + "if(window.__gk_movies_download_interceptor_v2)return;"
+                + "window.__gk_movies_download_interceptor_v2=true;"
+                + "function isDownloadLink(a){"
+                + "if(!a||!a.href)return false;"
+                + "var h=String(a.href);"
+                + "var c=(a.className||'').toString();"
+                + "return a.hasAttribute('download')"
+                + "|| c.indexOf('mkmc-theme-download-button')!==-1"
+                + "|| c.indexOf('mk-watch-white__download')!==-1"
+                + "|| c.indexOf('mkmc-watch-download')!==-1"
+                + "|| c.indexOf('mkmc-download-button')!==-1"
+                + "|| h.indexOf('mkmc_download_movie')!==-1"
+                + "|| h.indexOf('action=mkmc_download_movie')!==-1"
+                + "|| h.indexOf('response-content-disposition=')!==-1;"
+                + "}"
+                + "document.addEventListener('click',function(e){"
+                + "var a=e.target&&e.target.closest?e.target.closest('a'):null;"
+                + "if(a&&(/action=logout|loggedout=true/i).test(String(a.href||''))){try{window.GKMoviesAndroidBridge.logoutRequested();}catch(ignore){}}"
+                + "if(!isDownloadLink(a))return;"
+                + "e.preventDefault();e.stopPropagation();"
+                + "var card=a.closest('[data-title],article,.movie,.post,.mkmc-movie-card');"
+                + "var heading=card&&card.querySelector?card.querySelector('h1,h2,h3,.title,.movie-title'):null;"
+                + "var pageHeading=document.querySelector('h1');"
+                + "var title=a.getAttribute('download')||a.dataset.filename||a.dataset.title||(heading&&heading.textContent)||(pageHeading&&pageHeading.textContent)||document.title||'GK Movie';"
+                + "try{window.GKMoviesAndroidBridge.startMovieDownload(a.href,String(title).trim());}catch(err){window.location.href=a.href;}"
+                + "},true);"
+                + "})();";
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.KITKAT) {
+            view.evaluateJavascript(js, null);
+        } else {
+            view.loadUrl("javascript:" + js);
+        }
+    }
+
+    private boolean isMovieDownloadUrl(Uri uri) {
+        if (uri == null) return false;
+        String url = uri.toString().toLowerCase(Locale.US);
+        return url.contains("action=mkmc_download_movie")
+                || url.contains("mkmc_download_movie")
+                || url.contains("response-content-disposition=")
+                || url.contains("download=");
+    }
+
+    private boolean isLikelyMovieFileUrl(Uri uri) {
+        if (uri == null) return false;
+        String url = uri.toString().toLowerCase(Locale.US);
+        String path = uri.getPath() == null ? "" : uri.getPath().toLowerCase(Locale.US);
+        String host = uri.getHost() == null ? "" : uri.getHost().toLowerCase(Locale.US);
+
+        boolean movieExtension = path.endsWith(".mp4")
+                || path.endsWith(".mkv")
+                || path.endsWith(".avi")
+                || path.endsWith(".mov")
+                || path.endsWith(".webm")
+                || path.endsWith(".m4v")
+                || path.endsWith(".3gp");
+
+        boolean storageHost = host.contains("r2.dev")
+                || host.contains("r2.cloudflarestorage.com")
+                || host.contains("cloudflare")
+                || host.contains("cdn")
+                || host.contains("storage")
+                || host.contains("amazonaws.com");
+
+        return movieExtension || (storageHost && (url.contains(".mp4") || url.contains(".mkv") || url.contains(".webm") || url.contains("download")));
+    }
+
+    private boolean handleUrl(Uri uri) {
+        if (uri == null) return false;
+        String scheme = uri.getScheme();
+        String host = uri.getHost();
+        if (scheme == null) return false;
+
+        if (("http".equals(scheme) || "https".equals(scheme))) {
+            if (isMovieDownloadUrl(uri) || isLikelyMovieFileUrl(uri)) {
+                startDownload(
+                        uri.toString(),
+                webView != null ? webView.getSettings().getUserAgentString() : "GKMoviesAndroid/" + BuildConfig.VERSION_NAME,
+                        "attachment",
+                        guessMimeTypeFromUrl(uri.toString()),
+                        null
+                );
+                return true;
+            }
+            // Keep the website, Flutterwave checkout, and payment return pages
+            // inside the app. Non-web schemes such as bank-app intents still
+            // pass to Android below.
+            return false;
+        }
+
+        try {
+            startActivity(new Intent(Intent.ACTION_VIEW, uri));
+            return true;
+        } catch (Exception e) {
+            return true;
+        }
+    }
+
+    private String guessMimeTypeFromUrl(String url) {
+        if (url == null) return "application/octet-stream";
+        String lower = url.toLowerCase(Locale.US);
+        if (lower.contains(".mp4")) return "video/mp4";
+        if (lower.contains(".mkv")) return "video/x-matroska";
+        if (lower.contains(".webm")) return "video/webm";
+        if (lower.contains(".m4v")) return "video/x-m4v";
+        if (lower.contains(".mov")) return "video/quicktime";
+        if (lower.contains(".avi")) return "video/x-msvideo";
+        if (lower.contains(".3gp")) return "video/3gpp";
+        return "application/octet-stream";
+    }
+
+    private String cleanDownloadFilename(String url, String contentDisposition, String mimeType, String suggestedTitle) {
+        String filename = null;
+        if (suggestedTitle != null && !suggestedTitle.trim().isEmpty()) {
+            filename = suggestedTitle.trim()
+                    .replaceFirst("(?i)\\s*[|–—-]\\s*GK\\s*Movies.*$", "")
+                    .replaceFirst("(?i)^download\\s+", "");
+        }
+        if (filename == null || filename.length() < 2 || filename.equalsIgnoreCase("GK Movie")) {
+            filename = URLUtil.guessFileName(url, contentDisposition, mimeType);
+        }
+        if (filename != null) filename = filename.trim();
+
+        if (filename == null
+                || filename.isEmpty()
+                || filename.equalsIgnoreCase("admin-post.php")
+                || filename.equalsIgnoreCase("download")
+                || filename.toLowerCase(Locale.US).endsWith(".bin")) {
+            try {
+                Uri uri = Uri.parse(url);
+                String downloadName = uri.getQueryParameter("download");
+                if (downloadName != null && downloadName.trim().length() > 2) {
+                    filename = downloadName.trim();
+                }
+            } catch (Exception ignored) {}
+        }
+
+        if (filename == null || filename.trim().isEmpty() || filename.equalsIgnoreCase("admin-post.php")) {
+            String ext = ".mp4";
+            String safeUrl = url == null ? "" : url.toLowerCase(Locale.US);
+            if (safeUrl.contains(".mkv")) ext = ".mkv";
+            else if (safeUrl.contains(".webm")) ext = ".webm";
+            else if (safeUrl.contains(".m4v")) ext = ".m4v";
+            else if (safeUrl.contains(".mov")) ext = ".mov";
+            else if (safeUrl.contains(".avi")) ext = ".avi";
+            else if (safeUrl.contains(".3gp")) ext = ".3gp";
+            filename = "Mega-Movies-" + System.currentTimeMillis() + ext;
+        }
+
+        filename = filename.replaceAll("[\\\\/:*?\"<>|]", "-");
+        if (!filename.matches("(?i).*\\.(mp4|mkv|webm|m4v|mov|avi|3gp)$")) {
+            String ext = ".mp4";
+            String safeUrl = url == null ? "" : url.toLowerCase(Locale.US);
+            if (safeUrl.contains(".mkv")) ext = ".mkv";
+            else if (safeUrl.contains(".webm")) ext = ".webm";
+            else if (safeUrl.contains(".m4v")) ext = ".m4v";
+            else if (safeUrl.contains(".mov")) ext = ".mov";
+            else if (safeUrl.contains(".avi")) ext = ".avi";
+            else if (safeUrl.contains(".3gp")) ext = ".3gp";
+            filename = filename.replaceFirst("(?i)\\.(php|html?|bin)$", "") + ext;
+        }
+        return filename;
+    }
+
+    private void startDownload(String url, String userAgent, String contentDisposition, String mimeType, String suggestedTitle) {
+        if (url == null || url.trim().isEmpty()) {
+            Toast.makeText(this, "Download link is empty", Toast.LENGTH_SHORT).show();
+            return;
+        }
+
+        final String originalUrl = url.trim();
+        final String safeUserAgent = userAgent != null ? userAgent : ("GKMoviesAndroid/" + BuildConfig.VERSION_NAME);
+        CookieManager.getInstance().flush();
+        String currentCookies = CookieManager.getInstance().getCookie(originalUrl);
+        if (currentCookies == null || currentCookies.trim().isEmpty()) {
+            currentCookies = CookieManager.getInstance().getCookie(SITE_ORIGIN);
+        }
+        final String authCookies = currentCookies;
+        Toast.makeText(this, "Preparing download…", Toast.LENGTH_SHORT).show();
+
+        new Thread(() -> {
+            String resolvedUrl = resolveDownloadRedirect(originalUrl, safeUserAgent, authCookies);
+            runOnUiThread(() -> enqueueDownload(
+                    resolvedUrl != null && !resolvedUrl.trim().isEmpty() ? resolvedUrl : originalUrl,
+                    safeUserAgent,
+                    contentDisposition,
+                    mimeType,
+                    suggestedTitle
+            ));
+        }, "kb-download-resolver").start();
+    }
+
+    private String resolveDownloadRedirect(String originalUrl, String userAgent, String authCookies) {
+        Uri original = Uri.parse(originalUrl);
+        String host = original.getHost() == null ? "" : original.getHost().toLowerCase(Locale.US);
+        boolean needsAuthorizationRedirect = host.equals("megamovies.com.ng")
+                || host.equals("www.megamovies.com.ng")
+                || originalUrl.contains("mkmc_download_movie");
+
+        if (!needsAuthorizationRedirect) return originalUrl;
+
+        HttpURLConnection connection = null;
+        try {
+            connection = (HttpURLConnection) new URL(originalUrl).openConnection();
+            connection.setInstanceFollowRedirects(false);
+            connection.setRequestMethod("GET");
+            connection.setConnectTimeout(5000);
+            connection.setReadTimeout(5000);
+            connection.setRequestProperty("User-Agent", userAgent);
+            connection.setRequestProperty("Accept", "video/*,application/octet-stream,*/*");
+
+            if (authCookies != null && !authCookies.trim().isEmpty()) {
+                connection.setRequestProperty("Cookie", authCookies);
+            }
+
+            int code = connection.getResponseCode();
+            if (code >= 300 && code < 400) {
+                String location = connection.getHeaderField("Location");
+                if (location != null && !location.trim().isEmpty()) {
+                    return new URL(new URL(originalUrl), location.trim()).toString();
+                }
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "Could not pre-resolve download URL; using original URL", e);
+        } finally {
+            if (connection != null) connection.disconnect();
+        }
+        return originalUrl;
+    }
+
+    private void enqueueDownload(String url, String userAgent, String contentDisposition, String mimeType, String suggestedTitle) {
+        try {
+            String safeMimeType = (mimeType == null || mimeType.trim().isEmpty()) ? guessMimeTypeFromUrl(url) : mimeType;
+            if (safeMimeType == null || safeMimeType.trim().isEmpty()) safeMimeType = "application/octet-stream";
+
+            String filename = cleanDownloadFilename(url, contentDisposition, safeMimeType, suggestedTitle);
+            DownloadManager.Request request = new DownloadManager.Request(Uri.parse(url));
+            request.setMimeType(safeMimeType);
+            request.addRequestHeader("User-Agent", userAgent != null ? userAgent : ("GKMoviesAndroid/" + BuildConfig.VERSION_NAME));
+            request.addRequestHeader("Accept", "video/*,application/octet-stream,*/*");
+
+            String cookies = CookieManager.getInstance().getCookie(url);
+            if (cookies == null || cookies.trim().isEmpty()) {
+                cookies = CookieManager.getInstance().getCookie(SITE_ORIGIN);
+            }
+            if (cookies != null && !cookies.trim().isEmpty()) {
+                request.addRequestHeader("Cookie", cookies);
+            }
+
+            request.setTitle(filename);
+            request.setDescription("Downloading from Mega Movies");
+            request.setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED);
+            request.setAllowedNetworkTypes(DownloadManager.Request.NETWORK_WIFI | DownloadManager.Request.NETWORK_MOBILE);
+            request.setAllowedOverMetered(true);
+            request.setAllowedOverRoaming(true);
+            request.allowScanningByMediaScanner();
+
+            try {
+                request.setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, filename);
+            } catch (Exception e) {
+                request.setDestinationInExternalFilesDir(this, Environment.DIRECTORY_DOWNLOADS, filename);
+            }
+
+            DownloadManager manager = (DownloadManager) getSystemService(Context.DOWNLOAD_SERVICE);
+            if (manager != null) {
+                manager.enqueue(request);
+                Toast.makeText(this, "Downloading " + filename + ". Progress is shown in notifications.", Toast.LENGTH_LONG).show();
+            } else {
+                Toast.makeText(this, "Download manager is not available", Toast.LENGTH_SHORT).show();
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "Movie download failed", e);
+            Toast.makeText(this, "Download failed. Please try again.", Toast.LENGTH_LONG).show();
+        }
+    }
+
+    @Override
+    protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        setIntent(intent);
+        if (webView != null) webView.loadUrl(getLaunchUrl());
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        updateCacheMode();
+    }
+
+    @Override
+    public void onBackPressed() {
+        if (customFullscreenView != null) {
+            hideFullscreenCustomView();
+        } else if (webView != null && webView.canGoBack()) {
+            webView.goBack();
+        } else {
+            super.onBackPressed();
+        }
+    }
+
+    @Override
+    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode == REQ_FILE_CHOOSER && filePathCallback != null) {
+            Uri[] results = null;
+            if (resultCode == RESULT_OK && data != null) {
+                if (data.getClipData() != null) {
+                    int count = data.getClipData().getItemCount();
+                    results = new Uri[count];
+                    for (int i = 0; i < count; i++) results[i] = data.getClipData().getItemAt(i).getUri();
+                } else if (data.getData() != null) {
+                    results = new Uri[]{data.getData()};
+                }
+            }
+            filePathCallback.onReceiveValue(results);
+            filePathCallback = null;
+        }
+    }
+}

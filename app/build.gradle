@@ -1,0 +1,55 @@
+plugins {
+    id 'com.android.application'
+    id 'com.google.gms.google-services'
+}
+
+android {
+    namespace 'com.megamovies.app'
+    compileSdk 36
+
+    buildFeatures {
+        buildConfig true
+    }
+
+    defaultConfig {
+        applicationId 'com.megamovies.app'
+        minSdk 24
+        targetSdk 36
+        versionCode 5
+        versionName '1.2.1'
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_1_8
+        targetCompatibility JavaVersion.VERSION_1_8
+    }
+
+    signingConfigs {
+        release {
+            storeFile file('../mega-movies-upload-key.jks')
+            storePassword System.getenv('MEGA_KEYSTORE_PASSWORD')
+            keyAlias System.getenv('MEGA_KEY_ALIAS') ?: 'mega_movies'
+            keyPassword System.getenv('MEGA_KEY_PASSWORD')
+        }
+    }
+
+    buildTypes {
+        release {
+            signingConfig signingConfigs.release
+            minifyEnabled false
+        }
+    }
+}
+
+configurations.configureEach {
+    resolutionStrategy {
+        force 'androidx.core:core:1.13.1'
+    }
+}
+
+dependencies {
+    implementation 'androidx.core:core:1.13.1'
+    implementation 'androidx.swiperefreshlayout:swiperefreshlayout:1.1.0'
+    implementation platform('com.google.firebase:firebase-bom:33.7.0')
+    implementation 'com.google.firebase:firebase-messaging'
+}

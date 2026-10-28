@@ -1,0 +1,7 @@
+<resources>
+    <string name="app_name">Mega Movies</string>
+    <string name="provider_authority">com.megamovies.app.fileprovider</string>
+    <string name="asset_statements">[{\"relation\":[\"delegate_permission/common.handle_all_urls\"],\"target\":{\"namespace\":\"web\",\"site\":\"https://megamovies.com.ng\"}}]</string>
+    <string name="push_channel_name">Mega Movies updates</string>
+    <string name="push_channel_description">New movies and important Mega Movies announcements</string>
+</resources>

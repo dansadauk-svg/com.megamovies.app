@@ -1,0 +1,14 @@
+[
+  {
+    "relation": [
+      "delegate_permission/common.handle_all_urls"
+    ],
+    "target": {
+      "namespace": "android_app",
+      "package_name": "com.megamovies.app",
+      "sha256_cert_fingerprints": [
+        "03:13:E4:13:8D:F7:BF:5A:6B:BD:26:42:2A:D2:2B:30:D3:08:99:B8:81:52:3F:00:48:EA:2E:6B:94:B9:D2:41"
+      ]
+    }
+  }
+]
